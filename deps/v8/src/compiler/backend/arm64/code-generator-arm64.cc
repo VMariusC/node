@@ -1977,6 +1977,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Str(i.InputOrZeroRegister32(0), i.MemoryOperand(1));
       break;
+    case kArm64StrWPair:
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ Stp(i.InputOrZeroRegister32(0), i.InputOrZeroRegister32(1),
+             i.MemoryOperand(2));
+      break;
     case kArm64Ldr:
       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ldr(i.OutputRegister(), i.MemoryOperand());
@@ -2003,6 +2008,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Str:
       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Str(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
+      break;
+    case kArm64StrPair:
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ Stp(i.InputOrZeroRegister64(0), i.InputOrZeroRegister64(1),
+             i.MemoryOperand(2));
       break;
     case kArm64StrCompressTagged:
       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
@@ -3148,11 +3158,17 @@ void CodeGenerator::AssembleArchSelect(Instruction* instr,
     __ Fcsel(i.OutputFloat32Register(),
              i.InputFloat32Register(true_value_index),
              i.InputFloat32Register(false_value_index), cc);
-  } else {
-    DCHECK_EQ(rep, MachineRepresentation::kFloat64);
+  } else if (rep == MachineRepresentation::kFloat64) {
     __ Fcsel(i.OutputFloat64Register(),
              i.InputFloat64Register(true_value_index),
              i.InputFloat64Register(false_value_index), cc);
+  } else if (rep == MachineRepresentation::kWord32) {
+    __ Csel(i.OutputRegister32(), i.InputRegister32(true_value_index),
+            i.InputRegister32(false_value_index), cc);
+  } else {
+    DCHECK_EQ(rep, MachineRepresentation::kWord64);
+    __ Csel(i.OutputRegister64(), i.InputRegister64(true_value_index),
+            i.InputRegister64(false_value_index), cc);
   }
 }
 

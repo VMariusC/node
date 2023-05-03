@@ -234,7 +234,6 @@ Handle<FeedbackVector> FeedbackVector::New(
   DCHECK(!vector->maybe_has_maglev_code());
   DCHECK(!vector->maybe_has_turbofan_code());
   DCHECK_EQ(vector->invocation_count(), 0);
-  DCHECK_EQ(vector->profiler_ticks(), 0);
   DCHECK(vector->maybe_optimized_code()->IsCleared());
 
   // Ensure we can skip the write barrier
@@ -347,19 +346,14 @@ void FeedbackVector::AddToVectorsForProfilingTools(
   isolate->SetFeedbackVectorsForProfilingTools(*list);
 }
 
-void FeedbackVector::SaturatingIncrementProfilerTicks() {
-  int ticks = profiler_ticks();
-  if (ticks < Smi::kMaxValue) set_profiler_ticks(ticks + 1);
-}
-
 void FeedbackVector::SetOptimizedCode(Code code) {
   DCHECK(CodeKindIsOptimizedJSFunction(code.kind()));
-  // We should set optimized code only when there is no valid optimized code.
-  DCHECK(!has_optimized_code() ||
-         optimized_code().marked_for_deoptimization() ||
-         (CodeKindCanTierUp(optimized_code().kind()) &&
-          optimized_code().kind() < code.kind()) ||
-         v8_flags.stress_concurrent_inlining_attach_code);
+  // Skip setting optimized code if it would cause us to tier down.
+  if (has_optimized_code() && !optimized_code().marked_for_deoptimization() &&
+      (!CodeKindCanTierUp(optimized_code().kind()) ||
+       optimized_code().kind() > code.kind())) {
+    if (!v8_flags.stress_concurrent_inlining_attach_code) return;
+  }
   // TODO(mythria): We could see a CompileOptimized state here either from
   // tests that use %OptimizeFunctionOnNextCall, --always-turbofan or because we
   // re-mark the function for non-concurrent optimization after an OSR. We

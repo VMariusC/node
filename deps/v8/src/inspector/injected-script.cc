@@ -48,6 +48,7 @@
 #include "src/inspector/v8-console.h"
 #include "src/inspector/v8-inspector-impl.h"
 #include "src/inspector/v8-inspector-session-impl.h"
+#include "src/inspector/v8-serialization-duplicate-tracker.h"
 #include "src/inspector/v8-stack-trace-impl.h"
 #include "src/inspector/v8-value-utils.h"
 #include "src/inspector/value-mirror.h"
@@ -623,10 +624,34 @@ Response InjectedScript::wrapObjectMirror(
   }
   if (wrapMode == WrapMode::kGenerateWebDriverValue) {
     int maxDepth = 1;
-    std::unique_ptr<protocol::Runtime::WebDriverValue> webDriverValue =
-        mirror.buildWebDriverValue(context, maxDepth);
+
+    V8SerializationDuplicateTracker duplicateTracker{context};
+
+    std::unique_ptr<protocol::DictionaryValue> deepSerializedValueDict =
+        mirror.buildDeepSerializedValue(context, maxDepth, duplicateTracker);
+
+    String16 type;
+    deepSerializedValueDict->getString("type", &type);
+
+    std::unique_ptr<protocol::Runtime::DeepSerializedValue>
+        deepSerializedValue = protocol::Runtime::DeepSerializedValue::create()
+                                  .setType(type)
+                                  .build();
+
+    protocol::Value* maybeValue = deepSerializedValueDict->get("value");
+    if (maybeValue != nullptr) {
+      deepSerializedValue->setValue(maybeValue->clone());
+    }
+
+    int weakLocalObjectReference;
+    if (deepSerializedValueDict->getInteger("weakLocalObjectReference",
+                                            &weakLocalObjectReference)) {
+      deepSerializedValue->setWeakLocalObjectReference(
+          weakLocalObjectReference);
+    }
+
     if (!response.IsSuccess()) return response;
-    (*result)->setWebDriverValue(std::move(webDriverValue));
+    (*result)->setWebDriverValue(std::move(deepSerializedValue));
   }
 
   return Response::Success();

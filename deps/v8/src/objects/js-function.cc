@@ -229,9 +229,9 @@ void JSFunction::MarkForOptimization(Isolate* isolate, CodeKind target_kind,
   set_tiering_state(TieringStateFor(target_kind, mode));
 }
 
-void JSFunction::SetInterruptBudget(Isolate* isolate) {
+void JSFunction::SetInterruptBudget(Isolate* isolate, bool deoptimize) {
   raw_feedback_cell().set_interrupt_budget(
-      TieringManager::InterruptBudgetFor(isolate, *this));
+      TieringManager::InterruptBudgetFor(isolate, *this, deoptimize));
 }
 
 // static
@@ -538,7 +538,7 @@ void JSFunction::EnsureClosureFeedbackCellArray(
       ClosureFeedbackCellArray::New(isolate, shared);
   // Many closure cell is used as a way to specify that there is no
   // feedback cell for this function and a new feedback cell has to be
-  // allocated for this funciton. For ex: for eval functions, we have to create
+  // allocated for this function. For ex: for eval functions, we have to create
   // a feedback cell and cache it along with the code. It is safe to use
   // many_closure_cell to indicate this because in regular cases, it should
   // already have a feedback_vector / feedback cell array allocated.

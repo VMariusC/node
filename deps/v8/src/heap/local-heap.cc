@@ -365,6 +365,8 @@ void LocalHeap::SleepInSafepoint() {
 
   TRACE_GC1(heap_->tracer(), scope_id, thread_kind);
 
+  if (is_main_thread()) heap()->stack().SetMarkerToCurrentStackPosition();
+
   // Parking the running thread here is an optimization. We do not need to
   // wake this thread up to reach the next safepoint.
   ThreadState old_state = state_.SetParked();
@@ -481,11 +483,9 @@ void LocalHeap::InvokeGCEpilogueCallbacksInSafepoint(GCType gc_type,
 
 void LocalHeap::NotifyObjectSizeChange(
     HeapObject object, int old_size, int new_size,
-    ClearRecordedSlots clear_recorded_slots,
-    UpdateInvalidatedObjectSize update_invalidated_object_size) {
+    ClearRecordedSlots clear_recorded_slots) {
   heap()->NotifyObjectSizeChange(object, old_size, new_size,
-                                 clear_recorded_slots,
-                                 update_invalidated_object_size);
+                                 clear_recorded_slots);
 }
 
 void LocalHeap::WeakenDescriptorArrays(

@@ -157,10 +157,11 @@ void HeapInternalsBase::SimulateFullSpace(
       Heap::SweepingForcedFinalizationMode::kV8Only);
   space->FreeLinearAllocationArea();
   if (v8_flags.minor_mc) {
+    while (space->AddFreshPage()) {}
     for (Page* page : *space) {
       FillPageInPagedSpace(page, out_handles);
     }
-    DCHECK_EQ(0, space->free_list()->Available());
+    DCHECK_IMPLIES(space->free_list(), space->free_list()->Available() == 0);
   } else {
     do {
       FillCurrentPage(space, out_handles);

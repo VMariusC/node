@@ -120,11 +120,11 @@ Page* PagedSpaceBase::InitializePage(MemoryChunk* chunk) {
 
 PagedSpaceBase::PagedSpaceBase(
     Heap* heap, AllocationSpace space, Executability executable,
-    FreeList* free_list, AllocationCounter& allocation_counter,
+    std::unique_ptr<FreeList> free_list, AllocationCounter& allocation_counter,
     LinearAllocationArea& allocation_info_,
     LinearAreaOriginalData& linear_area_original_data,
     CompactionSpaceKind compaction_space_kind)
-    : SpaceWithLinearArea(heap, space, free_list, allocation_counter,
+    : SpaceWithLinearArea(heap, space, std::move(free_list), allocation_counter,
                           allocation_info_, linear_area_original_data),
       executable_(executable),
       compaction_space_kind_(compaction_space_kind) {
@@ -287,16 +287,16 @@ void PagedSpaceBase::RemovePage(Page* page) {
   DCHECK_IMPLIES(identity() == NEW_SPACE, page->IsFlagSet(Page::TO_PAGE));
   memory_chunk_list_.Remove(page);
   UnlinkFreeListCategories(page);
-  if (identity() == NEW_SPACE) {
-    page->ReleaseFreeListCategories();
-  }
   // Pages are only removed from new space when they are promoted to old space
   // during a GC. This happens after sweeping as started and the allocation
   // counters have been reset.
   DCHECK_IMPLIES(identity() == NEW_SPACE,
                  heap()->gc_state() != Heap::NOT_IN_GC);
-  if (identity() != NEW_SPACE) {
+  if (identity() == NEW_SPACE) {
+    page->ReleaseFreeListCategories();
+  } else {
     DecreaseAllocatedBytes(page->allocated_bytes(), page);
+    free_list()->decrease_wasted_bytes(page->wasted_memory());
   }
   DecreaseCapacity(page->area_size());
   AccountUncommitted(page->size());
@@ -352,9 +352,10 @@ void PagedSpaceBase::ShrinkImmortalImmovablePages() {
   }
 }
 
-Page* PagedSpaceBase::TryExpandImpl() {
-  Page* page = heap()->memory_allocator()->AllocatePage(
-      MemoryAllocator::AllocationMode::kRegular, this, executable());
+Page* PagedSpaceBase::TryExpandImpl(
+    MemoryAllocator::AllocationMode allocation_mode) {
+  Page* page = heap()->memory_allocator()->AllocatePage(allocation_mode, this,
+                                                        executable());
   if (page == nullptr) return nullptr;
   ConcurrentAllocationMutex guard(this);
   AddPage(page);
@@ -396,10 +397,8 @@ void PagedSpaceBase::SetLinearAllocationArea(Address top, Address limit,
   SetTopAndLimit(top, limit, end);
   if (top != kNullAddress && top != limit) {
     Page* page = Page::FromAllocationAreaAddress(top);
-    if (identity() == NEW_SPACE) {
-      page->MarkWasUsedForAllocation();
-    } else if (heap()->incremental_marking()->black_allocation()) {
-      DCHECK_NE(NEW_SPACE, identity());
+    if ((identity() != NEW_SPACE) &&
+        heap()->incremental_marking()->black_allocation()) {
       page->CreateBlackArea(top, limit);
     }
   }
@@ -532,6 +531,11 @@ void PagedSpaceBase::FreeLinearAllocationArea() {
 }
 
 void PagedSpaceBase::ReleasePage(Page* page) {
+  ReleasePageImpl(page, MemoryAllocator::FreeMode::kConcurrently);
+}
+
+void PagedSpaceBase::ReleasePageImpl(Page* page,
+                                     MemoryAllocator::FreeMode free_mode) {
   DCHECK(page->SweepingDone());
   DCHECK_EQ(0, heap()->non_atomic_marking_state()->live_bytes(page));
   DCHECK_EQ(page->owner(), this);
@@ -553,8 +557,7 @@ void PagedSpaceBase::ReleasePage(Page* page) {
   AccountUncommitted(page->size());
   DecrementCommittedPhysicalMemory(page->CommittedPhysicalMemory());
   accounting_stats_.DecreaseCapacity(page->area_size());
-  heap()->memory_allocator()->Free(MemoryAllocator::FreeMode::kConcurrently,
-                                   page);
+  heap()->memory_allocator()->Free(free_mode, page);
 }
 
 void PagedSpaceBase::SetReadable() {
@@ -708,7 +711,7 @@ void PagedSpaceBase::Verify(Isolate* isolate,
   PtrComprCageBase cage_base(isolate);
   for (const Page* page : *this) {
     CHECK_EQ(page->owner(), this);
-    CHECK_IMPLIES(identity() != NEW_SPACE, !page->WasUsedForAllocation());
+    CHECK_IMPLIES(identity() != NEW_SPACE, page->AllocatedLabSize() == 0);
     visitor->VerifyPage(page);
 
     for (int i = 0; i < kNumTypes; i++) {
@@ -855,11 +858,53 @@ bool PagedSpaceBase::RefillLabMain(int size_in_bytes, AllocationOrigin origin) {
   return RawRefillLabMain(size_in_bytes, origin);
 }
 
-Page* CompactionSpace::TryExpandImpl() {
+Page* CompactionSpace::TryExpandImpl(
+    MemoryAllocator::AllocationMode allocation_mode) {
   DCHECK_NE(NEW_SPACE, identity());
-  Page* page = PagedSpaceBase::TryExpandImpl();
+  Page* page = PagedSpaceBase::TryExpandImpl(allocation_mode);
   new_pages_.push_back(page);
   return page;
+}
+
+namespace {
+
+void DropFreeListCategories(Page* page, FreeList* free_list) {
+  size_t previously_available = 0;
+  page->ForAllFreeListCategories(
+      [free_list, &previously_available](FreeListCategory* category) {
+        previously_available += category->available();
+        category->Reset(free_list);
+      });
+  page->add_wasted_memory(previously_available);
+}
+
+}  // namespace
+
+void CompactionSpace::RefillFreeList() {
+  DCHECK_NE(NEW_SPACE, identity());
+
+  Sweeper* sweeper = heap()->sweeper();
+  size_t added = 0;
+  Page* p = nullptr;
+  while ((added <= kCompactionMemoryWanted) &&
+         (p = sweeper->GetSweptPageSafe(this))) {
+    // We regularly sweep NEVER_ALLOCATE_ON_PAGE pages. We drop the freelist
+    // entries here to make them unavailable for allocations.
+    if (p->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE)) {
+      DropFreeListCategories(p, free_list());
+    }
+
+    // Only during compaction pages can actually change ownership. This is
+    // safe because there exists no other competing action on the page links
+    // during compaction.
+    DCHECK_NE(this, p->owner());
+    PagedSpace* owner = static_cast<PagedSpace*>(p->owner());
+    base::MutexGuard guard(owner->mutex());
+    owner->RefineAllocatedBytesAfterSweeping(p);
+    owner->RemovePage(p);
+    added += AddPage(p);
+    added += p->wasted_memory();
+  }
 }
 
 bool CompactionSpace::RefillLabMain(int size_in_bytes,
@@ -869,7 +914,7 @@ bool CompactionSpace::RefillLabMain(int size_in_bytes,
 
 bool PagedSpaceBase::TryExpand(int size_in_bytes, AllocationOrigin origin) {
   DCHECK_NE(NEW_SPACE, identity());
-  Page* page = TryExpandImpl();
+  Page* page = TryExpandImpl(MemoryAllocator::AllocationMode::kRegular);
   if (!page) return false;
   if (!is_compaction_space() && identity() != NEW_SPACE) {
     heap()->NotifyOldGenerationExpansion(identity(), page);
@@ -1036,6 +1081,7 @@ size_t PagedSpaceBase::RelinkFreeListCategories(Page* page) {
     added += category->available();
     category->Relink(free_list());
   });
+  free_list()->increase_wasted_bytes(page->wasted_memory());
 
   DCHECK_IMPLIES(!page->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE),
                  page->AvailableInFreeList() ==
@@ -1043,44 +1089,29 @@ size_t PagedSpaceBase::RelinkFreeListCategories(Page* page) {
   return added;
 }
 
-void PagedSpace::RefillFreeList() {
+void PagedSpaceBase::RefillFreeList() {
   // Any PagedSpace might invoke RefillFreeList.
   DCHECK(identity() == OLD_SPACE || identity() == CODE_SPACE ||
-         identity() == SHARED_SPACE);
+         identity() == SHARED_SPACE || identity() == NEW_SPACE);
+  DCHECK_IMPLIES(
+      identity() == NEW_SPACE,
+      heap_->IsMainThread() || (heap_->IsSharedMainThread() &&
+                                !heap_->isolate()->is_shared_space_isolate()));
+  DCHECK(!is_compaction_space());
 
-  Sweeper* sweeper = heap()->sweeper();
-
-  size_t added = 0;
-
-  Page* p = nullptr;
-  while ((p = sweeper->GetSweptPageSafe(this)) != nullptr) {
+  for (Page* p : heap()->sweeper()->GetAllSweptPagesSafe(this)) {
     // We regularly sweep NEVER_ALLOCATE_ON_PAGE pages. We drop the freelist
     // entries here to make them unavailable for allocations.
+    DCHECK_IMPLIES(identity() == NEW_SPACE,
+                   !p->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE));
     if (p->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE)) {
-      p->ForAllFreeListCategories(
-          [this](FreeListCategory* category) { category->Reset(free_list()); });
+      DropFreeListCategories(p, free_list());
     }
 
-    // Only during compaction pages can actually change ownership. This is
-    // safe because there exists no other competing action on the page links
-    // during compaction.
-    if (is_compaction_space()) {
-      DCHECK_NE(this, p->owner());
-      DCHECK_NE(NEW_SPACE, identity());
-      PagedSpace* owner = reinterpret_cast<PagedSpace*>(p->owner());
-      base::MutexGuard guard(owner->mutex());
-      owner->RefineAllocatedBytesAfterSweeping(p);
-      owner->RemovePage(p);
-      added += AddPage(p);
-      added += p->wasted_memory();
-    } else {
-      base::MutexGuard guard(mutex());
-      DCHECK_EQ(this, p->owner());
-      RefineAllocatedBytesAfterSweeping(p);
-      added += RelinkFreeListCategories(p);
-      added += p->wasted_memory();
-    }
-    if (is_compaction_space() && (added > kCompactionMemoryWanted)) break;
+    ConcurrentAllocationMutex guard(this);
+    DCHECK_EQ(this, p->owner());
+    RefineAllocatedBytesAfterSweeping(p);
+    RelinkFreeListCategories(p);
   }
 }
 

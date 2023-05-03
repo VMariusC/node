@@ -270,13 +270,12 @@ void CodeGenerator::AssembleCode() {
   offsets_info_.blocks_start = masm()->pc_offset();
   for (const InstructionBlock* block : instructions()->ao_blocks()) {
     // Align loop headers on vendor recommended boundaries.
-    if (!masm()->jump_optimization_info()) {
-      if (block->ShouldAlignLoopHeader()) {
-        masm()->LoopHeaderAlign();
-      } else if (block->ShouldAlignCodeTarget()) {
-        masm()->CodeTargetAlign();
-      }
+    if (block->ShouldAlignLoopHeader()) {
+      masm()->LoopHeaderAlign();
+    } else if (block->ShouldAlignCodeTarget()) {
+      masm()->CodeTargetAlign();
     }
+
     if (info->trace_turbo_json()) {
       block_starts_[block->rpo_number().ToInt()] = masm()->pc_offset();
     }
@@ -523,9 +522,9 @@ MaybeHandle<Code> CodeGenerator::FinalizeCode() {
     return {};
   }
 
-  LOG_CODE_EVENT(isolate(), CodeLinePosInfoRecordEvent(code->InstructionStart(),
-                                                       *source_positions,
-                                                       JitCodeEvent::JIT_CODE));
+  LOG_CODE_EVENT(isolate(), CodeLinePosInfoRecordEvent(
+                                code->instruction_start(), *source_positions,
+                                JitCodeEvent::JIT_CODE));
 
   return code;
 }
@@ -999,7 +998,6 @@ void CodeGenerator::RecordCallPosition(Instruction* instr) {
   }
 
   if (needs_frame_state) {
-    MarkLazyDeoptSite();
     // If the frame state is present, it starts at argument 1 - after
     // the code address.
     size_t frame_state_offset = 1;
@@ -1336,10 +1334,6 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
       translations_.StoreLiteral(literal_id);
     }
   }
-}
-
-void CodeGenerator::MarkLazyDeoptSite() {
-  last_lazy_deopt_pc_ = masm()->pc_offset();
 }
 
 DeoptimizationExit* CodeGenerator::AddDeoptimizationExit(

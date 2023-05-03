@@ -33,6 +33,7 @@ class BuildConfig(object):
     self.debug_code = build_config['v8_enable_debug_code']
     self.dict_property_const_tracking = build_config[
         'v8_dict_property_const_tracking']
+    self.direct_local = build_config['v8_enable_direct_local']
     self.disassembler = build_config['v8_enable_disassembler']
     self.gdbjit = build_config['v8_enable_gdbjit']
     self.is_android = build_config['is_android']
@@ -41,6 +42,7 @@ class BuildConfig(object):
     self.is_debug = build_config['is_debug']
     self.is_DEBUG_defined = build_config['is_DEBUG_defined']
     self.is_full_debug = build_config['is_full_debug']
+    self.is_official_build = build_config['is_official_build']
     self.lite_mode = build_config['v8_enable_lite_mode']
     self.maglev = build_config['v8_enable_maglev']
     self.msan = build_config['is_msan']

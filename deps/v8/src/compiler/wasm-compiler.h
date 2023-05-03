@@ -121,8 +121,8 @@ V8_EXPORT_PRIVATE Handle<Code> CompileCWasmEntry(
 // and manipulated in wasm-compiler.{h,cc} instead of inside the Wasm decoder.
 // (Note that currently, the globals base is immutable, so not cached here.)
 struct WasmInstanceCacheNodes {
-  Node* mem_start;
-  Node* mem_size;
+  Node* mem_start = nullptr;
+  Node* mem_size = nullptr;
 };
 
 struct WasmLoopInfo {
@@ -462,9 +462,12 @@ class WasmGraphBuilder {
                  wasm::WasmCodePosition position);
   Node* ArrayNewFixed(const wasm::ArrayType* type, Node* rtt,
                       base::Vector<Node*> elements);
-  Node* ArrayNewSegment(const wasm::ArrayType* type, uint32_t data_segment,
+  Node* ArrayNewSegment(const wasm::ArrayType* type, uint32_t segment_index,
                         Node* offset, Node* length, Node* rtt,
                         wasm::WasmCodePosition position);
+  void ArrayInitSegment(const wasm::ArrayType* type, uint32_t segment_index,
+                        Node* array, Node* array_index, Node* segment_offset,
+                        Node* length, wasm::WasmCodePosition position);
   Node* I31New(Node* input);
   Node* I31GetS(Node* input, CheckForNull null_check,
                 wasm::WasmCodePosition position);
@@ -584,8 +587,15 @@ class WasmGraphBuilder {
 
   // Support for well-known imports.
   // See {CheckWellKnownImport} for signature and builtin ID definitions.
+  Node* WellKnown_StringIndexOf(Node* string, Node* search, Node* start,
+                                CheckForNull string_null_check,
+                                CheckForNull search_null_check);
   Node* WellKnown_StringToLowerCaseStringref(Node* string,
                                              CheckForNull null_check);
+  Node* WellKnown_ParseFloat(Node* string, CheckForNull null_check);
+  Node* WellKnown_DoubleToString(Node* n);
+  Node* WellKnown_IntToString(Node* n, Node* radix);
+
   bool has_simd() const { return has_simd_; }
 
   wasm::BoundsCheckStrategy bounds_checks() const {

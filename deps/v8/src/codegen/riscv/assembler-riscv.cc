@@ -1316,21 +1316,13 @@ void Assembler::db(uint8_t data) {
   EmitHelper(data);
 }
 
-void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
-  if (!RelocInfo::IsNoInfo(rmode)) {
-    DCHECK(RelocInfo::IsLiteralConstant(rmode));
-    RecordRelocInfo(rmode);
-  }
+void Assembler::dd(uint32_t data) {
   if (!is_buffer_growth_blocked()) CheckBuffer();
   DEBUG_PRINTF("%p(%x): constant 0x%x\n", pc_, pc_offset(), data);
   EmitHelper(data);
 }
 
-void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
-  if (!RelocInfo::IsNoInfo(rmode)) {
-    DCHECK(RelocInfo::IsLiteralConstant(rmode));
-    RecordRelocInfo(rmode);
-  }
+void Assembler::dq(uint64_t data) {
   if (!is_buffer_growth_blocked()) CheckBuffer();
   EmitHelper(data);
 }
@@ -1351,8 +1343,7 @@ void Assembler::dd(Label* label) {
 void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
   if (!ShouldRecordRelocInfo(rmode)) return;
   // We do not try to reuse pool constants.
-  RelocInfo rinfo(reinterpret_cast<Address>(pc_), rmode, data, Code(),
-                  InstructionStream());
+  RelocInfo rinfo(reinterpret_cast<Address>(pc_), rmode, data);
   DCHECK_GE(buffer_space(), kMaxRelocSize);  // Too late to grow buffer here.
   reloc_info_writer.Write(&rinfo);
 }
@@ -1612,24 +1603,6 @@ void Assembler::set_target_value_at(Address pc, uint32_t target,
   DCHECK_EQ(target_address_at(pc), target);
 }
 #endif
-
-UseScratchRegisterScope::UseScratchRegisterScope(Assembler* assembler)
-    : available_(assembler->GetScratchRegisterList()),
-      old_available_(*available_) {}
-
-UseScratchRegisterScope::~UseScratchRegisterScope() {
-  *available_ = old_available_;
-}
-
-Register UseScratchRegisterScope::Acquire() {
-  DCHECK_NOT_NULL(available_);
-  DCHECK(!available_->is_empty());
-  int index =
-      static_cast<int>(base::bits::CountTrailingZeros32(available_->bits()));
-  *available_ &= RegList::FromBits(~(1U << index));
-
-  return Register::from_code(index);
-}
 
 bool UseScratchRegisterScope::hasAvailable() const {
   return !available_->is_empty();

@@ -154,9 +154,8 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
     TNode<IntPtrT> cell;
     TNode<IntPtrT> mask;
     GetMarkBit(object, &cell, &mask);
-    TNode<Int32T> mask32 = TruncateIntPtrToInt32(mask);
     // Marked only requires checking a single bit here.
-    return Word32Equal(Word32And(Load<Int32T>(cell), mask32), Int32Constant(0));
+    return WordEqual(WordAnd(Load<IntPtrT>(cell), mask), IntPtrConstant(0));
   }
 
   void GetMarkBit(TNode<IntPtrT> object, TNode<IntPtrT>* cell,
@@ -168,18 +167,19 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
     {
       // Temp variable to calculate cell offset in bitmap.
       TNode<WordT> r0;
-      int shift = Bitmap::kBitsPerCellLog2 + kTaggedSizeLog2 -
-                  Bitmap::kBytesPerCellLog2;
+      int shift = MarkingBitmap::kBitsPerCellLog2 + kTaggedSizeLog2 -
+                  MarkingBitmap::kBytesPerCellLog2;
       r0 = WordShr(object, IntPtrConstant(shift));
       r0 = WordAnd(r0, IntPtrConstant((kPageAlignmentMask >> shift) &
-                                      ~(Bitmap::kBytesPerCell - 1)));
+                                      ~(MarkingBitmap::kBytesPerCell - 1)));
       *cell = IntPtrAdd(bitmap, Signed(r0));
     }
     {
       // Temp variable to calculate bit offset in cell.
       TNode<WordT> r1;
       r1 = WordShr(object, IntPtrConstant(kTaggedSizeLog2));
-      r1 = WordAnd(r1, IntPtrConstant((1 << Bitmap::kBitsPerCellLog2) - 1));
+      r1 = WordAnd(r1,
+                   IntPtrConstant((1 << MarkingBitmap::kBitsPerCellLog2) - 1));
       // It seems that LSB(e.g. cl) is automatically used, so no manual masking
       // is needed. Uncomment the following line otherwise.
       // WordAnd(r1, IntPtrConstant((1 << kBitsPerByte) - 1)));

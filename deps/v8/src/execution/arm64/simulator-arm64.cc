@@ -24,6 +24,7 @@
 #include "src/heap/combined-heap.h"
 #include "src/objects/objects-inl.h"
 #include "src/runtime/runtime-utils.h"
+#include "src/snapshot/embedded/embedded-data.h"
 #include "src/utils/ostreams.h"
 
 #if V8_OS_WIN
@@ -33,11 +34,6 @@
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/trap-handler/trap-handler-simulator.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
-
-#if defined(_MSC_VER)
-// define full memory barrier for msvc
-#define __sync_synchronize _ReadWriteBarrier
-#endif
 
 namespace v8 {
 namespace internal {
@@ -464,6 +460,10 @@ using SimulatorRuntimeCompareCall = int64_t (*)(double arg1, double arg2);
 using SimulatorRuntimeFPFPCall = double (*)(double arg1, double arg2);
 using SimulatorRuntimeFPCall = double (*)(double arg1);
 using SimulatorRuntimeFPIntCall = double (*)(double arg1, int32_t arg2);
+// Define four args for future flexibility; at the time of this writing only
+// one is ever used.
+using SimulatorRuntimeFPTaggedCall = double (*)(int64_t arg0, int64_t arg1,
+                                                int64_t arg2, int64_t arg3);
 
 // This signature supports direct call in to API function native callback
 // (refer to InvocationCallback in v8.h).
@@ -853,6 +853,24 @@ void Simulator::DoRuntimeCall(Instruction* instr) {
           reinterpret_cast<SimulatorRuntimeFPIntCall>(external);
       TraceSim("Arguments: %f, %d\n", dreg(0), wreg(0));
       double result = target(dreg(0), wreg(0));
+      TraceSim("Returned: %f\n", result);
+#ifdef DEBUG
+      CorruptAllCallerSavedCPURegisters();
+#endif
+      set_dreg(0, result);
+      break;
+    }
+
+    case ExternalReference::BUILTIN_FP_POINTER_CALL: {
+      // double f(Address tagged_ptr)
+      TraceSim("Type: BUILTIN_FP_POINTER_CALL\n");
+      SimulatorRuntimeFPTaggedCall target =
+          reinterpret_cast<SimulatorRuntimeFPTaggedCall>(external);
+      TraceSim(
+          "Arguments: "
+          "0x%016" PRIx64 ", 0x%016" PRIx64 ", 0x%016" PRIx64 ", 0x%016" PRIx64,
+          arg0, arg1, arg2, arg3);
+      double result = target(arg0, arg1, arg2, arg3);
       TraceSim("Returned: %f\n", result);
 #ifdef DEBUG
       CorruptAllCallerSavedCPURegisters();
@@ -2558,7 +2576,7 @@ void Simulator::CompareAndSwapHelper(const Instruction* instr) {
   T data = MemoryRead<T>(address);
   if (is_acquire) {
     // Approximate load-acquire by issuing a full barrier after the load.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   if (data == comparevalue) {
@@ -2568,7 +2586,7 @@ void Simulator::CompareAndSwapHelper(const Instruction* instr) {
       local_monitor_.NotifyStore();
       GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
       // Approximate store-release by issuing a full barrier before the store.
-      __sync_synchronize();
+      std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
     MemoryWrite<T>(address, newvalue);
@@ -2614,7 +2632,7 @@ void Simulator::CompareAndSwapPairHelper(const Instruction* instr) {
 
   if (is_acquire) {
     // Approximate load-acquire by issuing a full barrier after the load.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   bool same =
@@ -2626,7 +2644,7 @@ void Simulator::CompareAndSwapPairHelper(const Instruction* instr) {
       local_monitor_.NotifyStore();
       GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
       // Approximate store-release by issuing a full barrier before the store.
-      __sync_synchronize();
+      std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
     MemoryWrite<T>(address, newvalue_low);
@@ -2670,7 +2688,7 @@ void Simulator::AtomicMemorySimpleHelper(const Instruction* instr) {
 
   if (is_acquire) {
     // Approximate load-acquire by issuing a full barrier after the load.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   T result = 0;
@@ -2707,7 +2725,7 @@ void Simulator::AtomicMemorySimpleHelper(const Instruction* instr) {
     local_monitor_.NotifyStore();
     GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
     // Approximate store-release by issuing a full barrier before the store.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   MemoryWrite<T>(address, result);
@@ -2738,7 +2756,7 @@ void Simulator::AtomicMemorySwapHelper(const Instruction* instr) {
   T data = MemoryRead<T>(address);
   if (is_acquire) {
     // Approximate load-acquire by issuing a full barrier after the load.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   if (is_release) {
@@ -2746,7 +2764,7 @@ void Simulator::AtomicMemorySwapHelper(const Instruction* instr) {
     local_monitor_.NotifyStore();
     GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
     // Approximate store-release by issuing a full barrier before the store.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
   MemoryWrite<T>(address, reg<T>(rs));
 
@@ -3743,11 +3761,7 @@ void Simulator::VisitSystem(Instruction* instr) {
         UNIMPLEMENTED();
     }
   } else if (instr->Mask(MemBarrierFMask) == MemBarrierFixed) {
-#if defined(V8_OS_WIN)
-    MemoryBarrier();
-#else
-    __sync_synchronize();
-#endif
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   } else {
     UNIMPLEMENTED();
   }
@@ -4191,6 +4205,13 @@ void Simulator::VisitException(Instruction* instr) {
           } else {
             PrintF(stream_, "# %sDebugger hit %d.%s\n", clr_debug_number, code,
                    clr_normal);
+          }
+          Builtin maybe_builtin = OffHeapInstructionStream::TryLookupCode(
+              Isolate::Current(), reinterpret_cast<Address>(pc_));
+          if (Builtins::IsBuiltinId(maybe_builtin)) {
+            char const* name = Builtins::name(maybe_builtin);
+            PrintF(stream_, "# %s                %sLOCATION: %s%s\n",
+                   clr_debug_number, clr_debug_message, name, clr_normal);
           }
         }
 
@@ -6719,6 +6740,7 @@ void Simulator::GlobalMonitor::RemoveProcessor(Processor* processor) {
 //
 // The following functions are used by our gdb macros.
 //
+V8_DONT_STRIP_SYMBOL
 V8_EXPORT_PRIVATE extern bool _v8_internal_Simulator_ExecDebugCommand(
     const char* command) {
   i::Isolate* isolate = i::Isolate::Current();

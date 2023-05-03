@@ -23,6 +23,8 @@ namespace internal {
   V(CONSTRUCT_STUB_FRAME, 3)                              \
   V(DOUBLE_REGISTER, 1)                                   \
   V(DOUBLE_STACK_SLOT, 1)                                 \
+  V(HOLEY_DOUBLE_REGISTER, 1)                             \
+  V(HOLEY_DOUBLE_STACK_SLOT, 1)                           \
   V(DUPLICATED_OBJECT, 1)                                 \
   V(FLOAT_REGISTER, 1)                                    \
   V(FLOAT_STACK_SLOT, 1)                                  \
@@ -43,7 +45,7 @@ namespace internal {
   V(OPTIMIZED_OUT, 0)                                     \
   V(LITERAL, 1)                                           \
   V(REGISTER, 1)                                          \
-  V(STACK_SLOT, 1)                                        \
+  V(TAGGED_STACK_SLOT, 1)                                 \
   V(UINT32_REGISTER, 1)                                   \
   V(UINT32_STACK_SLOT, 1)                                 \
   V(UPDATE_FEEDBACK, 2)                                   \

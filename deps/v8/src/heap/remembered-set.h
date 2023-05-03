@@ -170,8 +170,7 @@ class RememberedSet : public AllStatic {
     while ((chunk = it.next()) != nullptr) {
       SlotSet* slot_set = chunk->slot_set<type>();
       TypedSlotSet* typed_slot_set = chunk->typed_slot_set<type>();
-      if (slot_set != nullptr || typed_slot_set != nullptr ||
-          chunk->invalidated_slots<type>() != nullptr) {
+      if (slot_set != nullptr || typed_slot_set != nullptr) {
         callback(chunk);
       }
     }
@@ -298,7 +297,6 @@ class RememberedSet : public AllStatic {
       chunk->ReleaseSlotSet<OLD_TO_OLD>();
       chunk->ReleaseSlotSet<OLD_TO_CODE>();
       chunk->ReleaseTypedSlotSet<OLD_TO_OLD>();
-      chunk->ReleaseInvalidatedSlots<OLD_TO_OLD>();
     }
   }
 };
@@ -328,7 +326,7 @@ class UpdateTypedSlotHelper {
     SlotCallbackResult result = callback(FullMaybeObjectSlot(&code));
     DCHECK(!HasWeakHeapObjectTag(code));
     if (code != old_code) {
-      base::Memory<Address>(entry_address) = code.entry();
+      base::Memory<Address>(entry_address) = code.instruction_start();
     }
     return result;
   }
@@ -362,7 +360,7 @@ class UpdateTypedSlotHelper {
     SlotCallbackResult result = callback(FullMaybeObjectSlot(&new_target));
     DCHECK(!HasWeakHeapObjectTag(new_target));
     if (new_target != old_target) {
-      rinfo->set_target_object(heap, HeapObject::cast(new_target));
+      rinfo->set_target_object(HeapObject::cast(new_target));
     }
     return result;
   }

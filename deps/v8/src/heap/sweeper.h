@@ -23,7 +23,6 @@
 namespace v8 {
 namespace internal {
 
-class InvalidatedSlotsCleanup;
 class MemoryChunk;
 class NonAtomicMarkingState;
 class Page;
@@ -141,6 +140,7 @@ class Sweeper {
                          int required_freed_bytes, int max_pages = 0);
 
   void EnsurePageIsSwept(Page* page);
+  void WaitForPageToBeSwept(Page* page);
 
   // After calling this function sweeping is considered to be in progress
   // and the main thread can sweep lazily, but the background sweeper tasks
@@ -212,10 +212,7 @@ class Sweeper {
   // memory which require clearing.
   void CleanupRememberedSetEntriesForFreedMemory(
       Address free_start, Address free_end, Page* page, bool record_free_ranges,
-      TypedSlotSet::FreeRangesMap* free_ranges_map, SweepingMode sweeping_mode,
-      InvalidatedSlotsCleanup* invalidated_old_to_new_cleanup,
-      InvalidatedSlotsCleanup* invalidated_old_to_old_cleanup,
-      InvalidatedSlotsCleanup* invalidated_old_to_shared_cleanup);
+      TypedSlotSet::FreeRangesMap* free_ranges_map, SweepingMode sweeping_mode);
 
   // Helper function for RawSweep. Clears invalid typed slots in the given free
   // ranges.
@@ -261,8 +258,6 @@ class Sweeper {
   void IncrementAndNotifyPromotedPagesIterationFinishedIfNeeded();
   void NotifyPromotedPagesIterationFinished();
 
-  void SnapshotPageSets();
-
   void AddSweptPage(Page* page, AllocationSpace identity);
 
   Heap* const heap_;
@@ -291,10 +286,6 @@ class Sweeper {
   std::atomic<size_t> iterated_promoted_pages_count_{0};
   base::Mutex promoted_pages_iteration_notification_mutex_;
   base::ConditionVariable promoted_pages_iteration_notification_variable_;
-  MemoryAllocator::NormalPagesSet snapshot_normal_pages_set_;
-  MemoryAllocator::LargePagesSet snapshot_large_pages_set_;
-  MemoryAllocator::NormalPagesSet snapshot_shared_normal_pages_set_;
-  MemoryAllocator::LargePagesSet snapshot_shared_large_pages_set_;
   std::atomic<bool> promoted_page_iteration_in_progress_{false};
   bool should_iterate_promoted_pages_ = false;
 };

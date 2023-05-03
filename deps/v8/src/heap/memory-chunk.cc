@@ -112,75 +112,23 @@ void MemoryChunk::SetDefaultCodePermissions() {
   }
 }
 
-namespace {
-
-PageAllocator::Permission DefaultWritableCodePermissions() {
-  DCHECK(!V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT);
-  // On MacOS on ARM64 RWX permissions are allowed to be set only when
-  // fast W^X is enabled (see V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT).
-  return V8_HAS_PTHREAD_JIT_WRITE_PROTECT || v8_flags.jitless
-             ? PageAllocator::kReadWrite
-             : PageAllocator::kReadWriteExecute;
-}
-
-}  // namespace
-
 MemoryChunk::MemoryChunk(Heap* heap, BaseSpace* space, size_t chunk_size,
                          Address area_start, Address area_end,
                          VirtualMemory reservation, Executability executable,
                          PageSize page_size)
     : BasicMemoryChunk(heap, space, chunk_size, area_start, area_end,
-                       std::move(reservation)) {
-  base::AsAtomicPointer::Release_Store(&slot_set_[OLD_TO_NEW], nullptr);
-  base::AsAtomicPointer::Release_Store(&slot_set_[OLD_TO_OLD], nullptr);
-  base::AsAtomicPointer::Release_Store(&slot_set_[OLD_TO_SHARED], nullptr);
-  base::AsAtomicPointer::Release_Store(&slot_set_[OLD_TO_CODE], nullptr);
-  base::AsAtomicPointer::Release_Store(&typed_slot_set_[OLD_TO_NEW], nullptr);
-  base::AsAtomicPointer::Release_Store(&typed_slot_set_[OLD_TO_OLD], nullptr);
-  base::AsAtomicPointer::Release_Store(&typed_slot_set_[OLD_TO_SHARED],
-                                       nullptr);
-  invalidated_slots_[OLD_TO_NEW] = nullptr;
-  invalidated_slots_[OLD_TO_OLD] = nullptr;
-  invalidated_slots_[OLD_TO_CODE] = nullptr;
-  invalidated_slots_[OLD_TO_SHARED] = nullptr;
-  progress_bar_.Initialize();
-  set_concurrent_sweeping_state(ConcurrentSweepingState::kDone);
-  page_protection_change_mutex_ = new base::Mutex();
-  write_unprotect_counter_ = 0;
-  mutex_ = new base::Mutex();
-  shared_mutex_ = new base::SharedMutex();
+                       std::move(reservation)),
+      mutex_(new base::Mutex()),
+      shared_mutex_(new base::SharedMutex()),
+      page_protection_change_mutex_(new base::Mutex()),
+      code_object_registry_(owner()->identity() == CODE_SPACE
+                                ? new CodeObjectRegistry()
+                                : nullptr) {
+  DCHECK_NE(space->identity(), RO_SPACE);
 
-  external_backing_store_bytes_[ExternalBackingStoreType::kArrayBuffer] = 0;
-  external_backing_store_bytes_[ExternalBackingStoreType::kExternalString] = 0;
-
-  categories_ = nullptr;
-
-  heap->non_atomic_marking_state()->SetLiveBytes(this, 0);
   if (executable == EXECUTABLE) {
     SetFlag(IS_EXECUTABLE);
-    if (heap->write_protect_code_memory()) {
-      write_unprotect_counter_ =
-          heap->code_space_memory_modification_scope_depth();
-    } else if (!V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT) {
-      size_t page_size = MemoryAllocator::GetCommitPageSize();
-      // On executable chunks, area_start_ points past padding used for code
-      // alignment.
-      Address start_before_padding =
-          address() + MemoryChunkLayout::ObjectPageOffsetInCodePage();
-      DCHECK(IsAligned(start_before_padding, page_size));
-      size_t area_size = RoundUp(area_end_ - start_before_padding, page_size);
-      CHECK(reservation_.SetPermissions(start_before_padding, area_size,
-                                        DefaultWritableCodePermissions()));
-    }
   }
-
-  if (owner()->identity() == CODE_SPACE) {
-    code_object_registry_ = new CodeObjectRegistry();
-  } else {
-    code_object_registry_ = nullptr;
-  }
-
-  possibly_empty_buckets_.Initialize();
 
   if (page_size == PageSize::kRegular) {
     active_system_pages_ = new ActiveSystemPages;
@@ -273,9 +221,6 @@ void MemoryChunk::ReleaseAllocatedMemoryNeededForWritableChunk() {
   ReleaseTypedSlotSet<OLD_TO_NEW>();
   ReleaseTypedSlotSet<OLD_TO_OLD>();
   ReleaseTypedSlotSet<OLD_TO_SHARED>();
-  ReleaseInvalidatedSlots<OLD_TO_NEW>();
-  ReleaseInvalidatedSlots<OLD_TO_OLD>();
-  ReleaseInvalidatedSlots<OLD_TO_SHARED>();
 
   if (!IsLargePage()) {
     Page* page = static_cast<Page*>(this);
@@ -357,122 +302,9 @@ void MemoryChunk::ReleaseTypedSlotSet() {
   }
 }
 
-template InvalidatedSlots* MemoryChunk::AllocateInvalidatedSlots<OLD_TO_NEW>();
-template InvalidatedSlots* MemoryChunk::AllocateInvalidatedSlots<OLD_TO_OLD>();
-
-template <RememberedSetType type>
-InvalidatedSlots* MemoryChunk::AllocateInvalidatedSlots() {
-  DCHECK_NULL(invalidated_slots_[type]);
-  invalidated_slots_[type] = new InvalidatedSlots();
-  return invalidated_slots_[type];
-}
-
-template void MemoryChunk::ReleaseInvalidatedSlots<OLD_TO_NEW>();
-template void MemoryChunk::ReleaseInvalidatedSlots<OLD_TO_OLD>();
-template void MemoryChunk::ReleaseInvalidatedSlots<OLD_TO_SHARED>();
-
-template <RememberedSetType type>
-void MemoryChunk::ReleaseInvalidatedSlots() {
-  if (invalidated_slots_[type]) {
-    delete invalidated_slots_[type];
-    invalidated_slots_[type] = nullptr;
-  }
-}
-
-template V8_EXPORT_PRIVATE void
-MemoryChunk::RegisterObjectWithInvalidatedSlots<OLD_TO_NEW>(HeapObject object,
-                                                            int new_size);
-template V8_EXPORT_PRIVATE void
-MemoryChunk::RegisterObjectWithInvalidatedSlots<OLD_TO_OLD>(HeapObject object,
-                                                            int new_size);
-template V8_EXPORT_PRIVATE void MemoryChunk::RegisterObjectWithInvalidatedSlots<
-    OLD_TO_SHARED>(HeapObject object, int new_size);
-
-template <RememberedSetType type>
-void MemoryChunk::RegisterObjectWithInvalidatedSlots(HeapObject object,
-                                                     int new_size) {
-  // ByteArray and FixedArray are still invalidated in tests.
-  DCHECK(object.IsString() || object.IsByteArray() || object.IsFixedArray());
-  DCHECK(!object.InWritableSharedSpace());
-  bool skip_slot_recording;
-
-  switch (type) {
-    case OLD_TO_NEW:
-      skip_slot_recording = InYoungGeneration();
-      break;
-
-    case OLD_TO_OLD:
-      skip_slot_recording = ShouldSkipEvacuationSlotRecording();
-      break;
-
-    case OLD_TO_SHARED:
-      skip_slot_recording = InYoungGeneration();
-      break;
-
-    default:
-      UNREACHABLE();
-  }
-
-  if (skip_slot_recording) {
-    return;
-  }
-
-  if (invalidated_slots<type>() == nullptr) {
-    AllocateInvalidatedSlots<type>();
-  }
-
-  DCHECK_GT(new_size, 0);
-  InvalidatedSlots& invalidated_slots = *this->invalidated_slots<type>();
-  DCHECK_IMPLIES(invalidated_slots.count(object) > 0,
-                 new_size <= invalidated_slots[object]);
-  invalidated_slots.insert_or_assign(object, new_size);
-}
-
-template V8_EXPORT_PRIVATE void
-MemoryChunk::UpdateInvalidatedObjectSize<OLD_TO_NEW>(HeapObject object,
-                                                     int new_size);
-template V8_EXPORT_PRIVATE void
-MemoryChunk::UpdateInvalidatedObjectSize<OLD_TO_OLD>(HeapObject object,
-                                                     int new_size);
-template V8_EXPORT_PRIVATE void
-MemoryChunk::UpdateInvalidatedObjectSize<OLD_TO_SHARED>(HeapObject object,
-                                                        int new_size);
-
-template <RememberedSetType type>
-void MemoryChunk::UpdateInvalidatedObjectSize(HeapObject object, int new_size) {
-  DCHECK(!object.InWritableSharedSpace());
-  DCHECK_GT(new_size, 0);
-
-  if (invalidated_slots<type>() == nullptr) return;
-
-  InvalidatedSlots& invalidated_slots = *this->invalidated_slots<type>();
-  if (invalidated_slots.count(object) > 0) {
-    DCHECK_LE(new_size, invalidated_slots[object]);
-    DCHECK_NE(0, invalidated_slots[object]);
-    invalidated_slots.insert_or_assign(object, new_size);
-  }
-}
-
-template bool MemoryChunk::RegisteredObjectWithInvalidatedSlots<OLD_TO_NEW>(
-    HeapObject object);
-template bool MemoryChunk::RegisteredObjectWithInvalidatedSlots<OLD_TO_OLD>(
-    HeapObject object);
-template bool MemoryChunk::RegisteredObjectWithInvalidatedSlots<OLD_TO_SHARED>(
-    HeapObject object);
-
-template <RememberedSetType type>
-bool MemoryChunk::RegisteredObjectWithInvalidatedSlots(HeapObject object) {
-  if (invalidated_slots<type>() == nullptr) {
-    return false;
-  }
-  return invalidated_slots<type>()->find(object) !=
-         invalidated_slots<type>()->end();
-}
-
 bool MemoryChunk::HasRecordedSlots() const {
   for (int rs_type = 0; rs_type < NUMBER_OF_REMEMBERED_SET_TYPES; rs_type++) {
-    if (slot_set_[rs_type] || typed_slot_set_[rs_type] ||
-        invalidated_slots_[rs_type]) {
+    if (slot_set_[rs_type] || typed_slot_set_[rs_type]) {
       return true;
     }
   }
@@ -481,8 +313,7 @@ bool MemoryChunk::HasRecordedSlots() const {
 }
 
 bool MemoryChunk::HasRecordedOldToNewSlots() const {
-  return slot_set_[OLD_TO_NEW] || typed_slot_set_[OLD_TO_NEW] ||
-         invalidated_slots_[OLD_TO_NEW];
+  return slot_set_[OLD_TO_NEW] || typed_slot_set_[OLD_TO_NEW];
 }
 
 #ifdef DEBUG
@@ -498,9 +329,6 @@ void MemoryChunk::ValidateOffsets(MemoryChunk* chunk) {
   DCHECK_EQ(
       reinterpret_cast<Address>(&chunk->typed_slot_set_) - chunk->address(),
       MemoryChunkLayout::kTypedSlotSetOffset);
-  DCHECK_EQ(
-      reinterpret_cast<Address>(&chunk->invalidated_slots_) - chunk->address(),
-      MemoryChunkLayout::kInvalidatedSlotsOffset);
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->mutex_) - chunk->address(),
             MemoryChunkLayout::kMutexOffset);
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->shared_mutex_) - chunk->address(),
@@ -530,9 +358,9 @@ void MemoryChunk::ValidateOffsets(MemoryChunk* chunk) {
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->active_system_pages_) -
                 chunk->address(),
             MemoryChunkLayout::kActiveSystemPagesOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->was_used_for_allocation_) -
-                chunk->address(),
-            MemoryChunkLayout::kWasUsedForAllocationOffset);
+  DCHECK_EQ(
+      reinterpret_cast<Address>(&chunk->allocated_lab_size_) - chunk->address(),
+      MemoryChunkLayout::kAllocatedLabSizeOffset);
 }
 #endif
 

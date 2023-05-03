@@ -142,6 +142,9 @@ class HeapObject : public Object {
   inline void IterateFast(PtrComprCageBase cage_base, ObjectVisitor* v);
 
   template <typename ObjectVisitor>
+  inline void IterateFast(Map map, ObjectVisitor* v);
+
+  template <typename ObjectVisitor>
   inline void IterateFast(Map map, int object_size, ObjectVisitor* v);
 
   // Iterates over all pointers contained in the object except the
@@ -243,11 +246,6 @@ class HeapObject : public Object {
   inline Address GetFieldAddress(int field_offset) const;
 
  protected:
-  // Special-purpose constructor for subclasses that have fast paths where
-  // their ptr() is a Smi.
-  enum class AllowInlineSmiStorage { kRequireHeapObjectTag, kAllowBeingASmi };
-  inline HeapObject(Address ptr, AllowInlineSmiStorage allow_smi);
-
   OBJECT_CONSTRUCTORS(HeapObject, Object);
 
  private:
